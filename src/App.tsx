@@ -9,6 +9,7 @@ import Participants from "./pages/Participants";
 import EmailAutomation from "./pages/EmailAutomation";
 import SocialMedia from "./pages/SocialMedia";
 import Scheduler from "./pages/Scheduler";
+import CrisisManagement from "./pages/CrisisManagement";
 import SwarmControl from "./pages/SwarmControl";
 import Analytics from "./pages/Analytics";
 import SettingsPage from "./pages/Settings";
