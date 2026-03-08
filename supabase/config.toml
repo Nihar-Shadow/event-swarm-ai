@@ -8,3 +8,6 @@ verify_jwt = false
 
 [functions.optimize-schedule]
 verify_jwt = false
+
+[functions.resolve-crisis]
+verify_jwt = false
