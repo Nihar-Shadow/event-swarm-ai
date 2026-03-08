@@ -1,11 +1,11 @@
 import {
   LayoutDashboard,
-  Bot,
-  Calendar,
   Users,
   Mail,
+  Share2,
+  CalendarClock,
+  Cpu,
   BarChart3,
-  Activity,
   Settings,
   Zap,
 } from "lucide-react";
@@ -27,14 +27,11 @@ import {
 
 const mainNav = [
   { title: "Dashboard", url: "/", icon: LayoutDashboard },
-  { title: "AI Agents", url: "/agents", icon: Bot },
-  { title: "Events", url: "/events", icon: Calendar },
-  { title: "Schedule", url: "/schedule", icon: Activity },
   { title: "Participants", url: "/participants", icon: Users },
-];
-
-const toolsNav = [
-  { title: "Email Campaigns", url: "/emails", icon: Mail },
+  { title: "Email Automation", url: "/email-automation", icon: Mail },
+  { title: "Social Media Agent", url: "/social-media", icon: Share2 },
+  { title: "Event Scheduler", url: "/scheduler", icon: CalendarClock },
+  { title: "Swarm Control Center", url: "/swarm-control", icon: Cpu },
   { title: "Analytics", url: "/analytics", icon: BarChart3 },
   { title: "Settings", url: "/settings", icon: Settings },
 ];
@@ -63,28 +60,10 @@ export function AppSidebar() {
 
       <SidebarContent>
         <SidebarGroup>
-          <SidebarGroupLabel>Command Center</SidebarGroupLabel>
+          <SidebarGroupLabel>Navigation</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
               {mainNav.map((item) => (
-                <SidebarMenuItem key={item.title}>
-                  <SidebarMenuButton asChild isActive={isActive(item.url)}>
-                    <NavLink to={item.url} end activeClassName="bg-sidebar-accent text-primary font-medium">
-                      <item.icon className="h-4 w-4" />
-                      {!collapsed && <span>{item.title}</span>}
-                    </NavLink>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              ))}
-            </SidebarMenu>
-          </SidebarGroupContent>
-        </SidebarGroup>
-
-        <SidebarGroup>
-          <SidebarGroupLabel>Tools</SidebarGroupLabel>
-          <SidebarGroupContent>
-            <SidebarMenu>
-              {toolsNav.map((item) => (
                 <SidebarMenuItem key={item.title}>
                   <SidebarMenuButton asChild isActive={isActive(item.url)}>
                     <NavLink to={item.url} end activeClassName="bg-sidebar-accent text-primary font-medium">
@@ -104,7 +83,7 @@ export function AppSidebar() {
           <div className="glass-card rounded-lg p-3 animate-fade-in">
             <div className="flex items-center gap-2">
               <div className="h-2 w-2 rounded-full bg-neon-green animate-pulse-slow" />
-              <span className="text-xs text-sidebar-foreground">6 agents online</span>
+              <span className="text-xs text-sidebar-foreground">8 agents online</span>
             </div>
           </div>
         )}
