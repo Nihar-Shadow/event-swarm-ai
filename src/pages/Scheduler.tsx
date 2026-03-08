@@ -300,7 +300,7 @@ const Scheduler = () => {
                 {rooms.map(rm => (
                   <Badge key={rm.id} variant="secondary" className="gap-1.5 px-3 py-1.5">
                     <Building2 className="h-3 w-3" />{rm.name}{rm.capacity ? ` (${rm.capacity})` : ""}
-                    <button onClick={() => deleteItem("rooms", rm.id)} className="ml-1 hover:text-destructive"><X className="h-3 w-3" /></button>
+                    <button onClick={() => deleteRoom(rm.id)} className="ml-1 hover:text-destructive"><X className="h-3 w-3" /></button>
                   </Badge>
                 ))}
               </div>
