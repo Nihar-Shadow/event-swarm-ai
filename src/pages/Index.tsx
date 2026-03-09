@@ -89,12 +89,12 @@ const Index = () => {
               <AreaChart data={chartData} margin={{ top: 5, right: 5, left: -20, bottom: 0 }}>
                 <defs>
                   <linearGradient id="regGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="hsl(190, 95%, 45%)" stopOpacity={0.3} />
-                    <stop offset="95%" stopColor="hsl(190, 95%, 45%)" stopOpacity={0} />
+                    <stop offset="5%" stopColor="hsl(215, 90%, 50%)" stopOpacity={0.2} />
+                    <stop offset="95%" stopColor="hsl(215, 90%, 50%)" stopOpacity={0} />
                   </linearGradient>
                   <linearGradient id="emailGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="hsl(270, 80%, 60%)" stopOpacity={0.3} />
-                    <stop offset="95%" stopColor="hsl(270, 80%, 60%)" stopOpacity={0} />
+                    <stop offset="5%" stopColor="hsl(250, 65%, 55%)" stopOpacity={0.2} />
+                    <stop offset="95%" stopColor="hsl(250, 65%, 55%)" stopOpacity={0} />
                   </linearGradient>
                 </defs>
                 <CartesianGrid strokeDasharray="3 3" stroke="hsl(225, 18%, 16%)" />
