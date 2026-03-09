@@ -13,6 +13,8 @@ import {
   insertEmailLogs,
   updateEmailLogStatus,
   personalizeEmails,
+  sendBulkEmails,
+  fetchAgentEmailLogs,
   type EmailCampaign,
   type EmailLog,
 } from "@/lib/email-campaigns";
@@ -45,9 +47,9 @@ const EmailAutomation = () => {
   const { data: participants = [], isLoading: loadingParticipants } = useParticipants();
   const { data: campaigns = [] } = useQuery({ queryKey: ["email_campaigns"], queryFn: fetchCampaigns });
   const { data: logs = [] } = useQuery({
-    queryKey: ["email_logs", selectedCampaignId],
-    queryFn: () => (selectedCampaignId ? fetchEmailLogs(selectedCampaignId) : Promise.resolve([])),
-    enabled: !!selectedCampaignId,
+    queryKey: ["email_logs"],
+    queryFn: fetchAgentEmailLogs,
+    refetchInterval: isSending ? 2000 : false, // Auto refresh while sending
   });
 
   const addLog = useCallback((message: string, type: "info" | "success" | "error" = "info") => {
@@ -74,71 +76,29 @@ const EmailAutomation = () => {
     }
   };
 
-  // Simulate bulk send
+  // Send real bulk emails via Python backend
   const handleSend = async () => {
     if (participants.length === 0) {
       toast({ title: "No participants", description: "Upload participants first.", variant: "destructive" });
       return;
     }
+
     setIsSending(true);
-    addLog(`[Email Agent] Starting bulk email campaign to ${participants.length} participants`);
+    addLog(`[Email Agent] Requesting bulk send to Python backend...`);
 
     try {
-      // Create campaign
-      const campaign = await createCampaign({ subject_template: subjectTemplate, body_template: bodyTemplate, event_name: eventName });
-      setSelectedCampaignId(campaign.id);
-      addLog(`[Email Agent] Campaign created: ${campaign.id.slice(0, 8)}...`);
+      const result = await sendBulkEmails(subjectTemplate, bodyTemplate, participants, eventName);
 
-      // Personalize
-      const personalized = await personalizeEmails(subjectTemplate, bodyTemplate, participants, eventName);
-      addLog(`[Email Agent] Personalized ${personalized.length} emails`);
+      addLog(`[Email Agent] Success! Sent: ${result.sent}, Failed: ${result.failed}`, "success");
+      toast({
+        title: "Campaign dispatched",
+        description: `Successfully sent ${result.sent} emails. ${result.failed} failed.`
+      });
 
-      // Insert logs as pending
-      const logEntries = personalized.map((p) => ({
-        campaign_id: campaign.id,
-        participant_id: p.participant_id,
-        participant_name: p.participant_name,
-        participant_email: p.participant_email,
-        personalized_subject: p.personalized_subject,
-        personalized_body: p.personalized_body,
-        status: "pending" as const,
-        sent_at: null,
-      }));
-      await insertEmailLogs(logEntries);
-      await updateCampaignStatus(campaign.id, "sending", { total_recipients: personalized.length });
-      addLog(`[Email Agent] Sending personalized emails to ${personalized.length} participants`);
-
-      // Simulate sending with delays
-      const allLogs = await fetchEmailLogs(campaign.id);
-      let sentCount = 0;
-      let failedCount = 0;
-
-      for (const log of allLogs) {
-        await new Promise((r) => setTimeout(r, 120 + Math.random() * 200));
-        const success = Math.random() > 0.03; // 97% success rate
-        const newStatus = success ? "sent" : "failed";
-        await updateEmailLogStatus(log.id, newStatus);
-        if (success) sentCount++;
-        else failedCount++;
-
-        if (sentCount % 25 === 0 || !success) {
-          addLog(
-            success
-              ? `[Email Agent] Sent ${sentCount}/${allLogs.length} emails...`
-              : `[Email Agent] ⚠ Failed to send to ${log.participant_name}`,
-            success ? "info" : "error"
-          );
-        }
-      }
-
-      await updateCampaignStatus(campaign.id, "completed", { sent_count: sentCount, failed_count: failedCount });
-      addLog(`[Email Agent] ✓ Delivery completed — ${sentCount} sent, ${failedCount} failed`, "success");
-      qc.invalidateQueries({ queryKey: ["email_campaigns"] });
-      qc.invalidateQueries({ queryKey: ["email_logs", campaign.id] });
+      qc.invalidateQueries({ queryKey: ["email_logs"] });
       setTab("logs");
-      toast({ title: "Campaign completed", description: `${sentCount} emails sent successfully.` });
     } catch (err: any) {
-      addLog(`[Email Agent] ✗ Campaign failed: ${err.message}`, "error");
+      addLog(`[Email Agent] ✗ Sending failed: ${err.message}`, "error");
       toast({ title: "Send failed", description: err.message, variant: "destructive" });
     } finally {
       setIsSending(false);
@@ -185,9 +145,8 @@ const EmailAutomation = () => {
           <button
             key={t.key}
             onClick={() => setTab(t.key)}
-            className={`flex items-center gap-1.5 px-4 py-2 rounded-md text-sm font-medium transition-all ${
-              tab === t.key ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
-            }`}
+            className={`flex items-center gap-1.5 px-4 py-2 rounded-md text-sm font-medium transition-all ${tab === t.key ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+              }`}
           >
             <t.icon className="h-3.5 w-3.5" />
             {t.label}
@@ -340,11 +299,10 @@ const EmailAutomation = () => {
                     <button
                       key={c.id}
                       onClick={() => setSelectedCampaignId(c.id)}
-                      className={`text-xs px-3 py-1.5 rounded-lg font-medium transition-colors ${
-                        selectedCampaignId === c.id
-                          ? "bg-primary text-primary-foreground"
-                          : "bg-secondary text-muted-foreground hover:text-foreground"
-                      }`}
+                      className={`text-xs px-3 py-1.5 rounded-lg font-medium transition-colors ${selectedCampaignId === c.id
+                        ? "bg-primary text-primary-foreground"
+                        : "bg-secondary text-muted-foreground hover:text-foreground"
+                        }`}
                     >
                       {c.event_name} — {new Date(c.created_at).toLocaleDateString()}
                     </button>
@@ -363,18 +321,19 @@ const EmailAutomation = () => {
                       </tr>
                     </thead>
                     <tbody>
-                      {logs.map((log) => (
-                        <tr key={log.id} className="border-b border-border/20 hover:bg-secondary/30">
+                      {logs.map((log: any, idx: number) => (
+                        <tr key={log.id || idx} className="border-b border-border/20 hover:bg-secondary/30">
                           <td className="p-2">{statusIcon(log.status)}</td>
                           <td className="p-2">
-                            <p className="font-medium text-xs">{log.participant_name}</p>
-                            <p className="text-[10px] text-muted-foreground font-mono">{log.participant_email || "—"}</p>
+                            <p className="font-medium text-xs">{log.participant_name || log.email.split('@')[0]}</p>
+                            <p className="text-[10px] text-muted-foreground font-mono">{log.participant_email || log.email || "—"}</p>
+                            {log.error_message && <p className="text-[8px] text-destructive italic">{log.error_message}</p>}
                           </td>
                           <td className="p-2 text-xs text-muted-foreground truncate max-w-[200px] hidden md:table-cell">
-                            {log.personalized_subject}
+                            {log.personalized_subject || "Bulk Send"}
                           </td>
                           <td className="p-2 text-[10px] text-muted-foreground font-mono hidden sm:table-cell">
-                            {log.sent_at ? new Date(log.sent_at).toLocaleTimeString() : "—"}
+                            {log.sent_at || log.timestamp ? new Date(log.sent_at || log.timestamp).toLocaleTimeString() : "—"}
                           </td>
                         </tr>
                       ))}
@@ -406,11 +365,10 @@ const EmailAutomation = () => {
                     <p className="text-xs font-medium truncate">{c.event_name}</p>
                     <div className="flex items-center gap-3 mt-1">
                       <span className="text-[10px] text-muted-foreground">{c.total_recipients} recipients</span>
-                      <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded ${
-                        c.status === "completed" ? "bg-neon-green/10 text-neon-green" :
+                      <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded ${c.status === "completed" ? "bg-neon-green/10 text-neon-green" :
                         c.status === "sending" ? "bg-primary/10 text-primary" :
-                        "bg-muted text-muted-foreground"
-                      }`}>{c.status}</span>
+                          "bg-muted text-muted-foreground"
+                        }`}>{c.status}</span>
                     </div>
                   </div>
                 ))}
@@ -429,11 +387,10 @@ const EmailAutomation = () => {
               {agentLogs.length > 0 ? (
                 agentLogs.map((log, i) => (
                   <div key={i} className="flex items-start gap-2 p-2 rounded-md bg-secondary/30 text-xs">
-                    <span className={`shrink-0 mt-0.5 h-1.5 w-1.5 rounded-full ${
-                      log.type === "success" ? "bg-neon-green" :
+                    <span className={`shrink-0 mt-0.5 h-1.5 w-1.5 rounded-full ${log.type === "success" ? "bg-neon-green" :
                       log.type === "error" ? "bg-destructive" :
-                      "bg-primary"
-                    }`} />
+                        "bg-primary"
+                      }`} />
                     <div className="min-w-0">
                       <p className="text-foreground leading-snug">{log.message}</p>
                       <p className="text-[10px] text-muted-foreground font-mono">{log.time}</p>

@@ -85,20 +85,60 @@ export async function personalizeEmails(
   participants: any[],
   eventName: string
 ) {
-  const { data, error } = await supabase.functions.invoke("personalize-emails", {
-    body: {
-      template_subject: subjectTemplate,
-      template_body: bodyTemplate,
-      participants,
-      event_name: eventName,
-    },
+  // We call our local Python backend instead of Supabase Edge Functions
+  const response = await fetch("http://localhost:8000/api/preview-emails", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      eventName,
+      subjectTemplate,
+      bodyTemplate,
+      participants
+    }),
   });
-  if (error) throw error;
-  return data.personalized as {
-    participant_id: string;
-    participant_name: string;
-    participant_email: string | null;
-    personalized_subject: string;
-    personalized_body: string;
-  }[];
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || "Failed to generate previews");
+  }
+
+  const data = await response.json();
+  // Map Python response to expected frontend format
+  return data.map((p: any) => ({
+    participant_name: p.name,
+    participant_email: p.email,
+    personalized_subject: p.subject,
+    personalized_body: p.body,
+  }));
+}
+
+export async function sendBulkEmails(
+  subjectTemplate: string,
+  bodyTemplate: string,
+  participants: any[],
+  eventName: string
+) {
+  const response = await fetch("http://localhost:8000/api/send-bulk-emails", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      eventName,
+      subjectTemplate,
+      bodyTemplate,
+      participants
+    }),
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || "Failed to send bulk emails");
+  }
+
+  return await response.json();
+}
+
+export async function fetchAgentEmailLogs() {
+  const response = await fetch("http://localhost:8000/api/email-logs");
+  if (!response.ok) throw new Error("Failed to fetch email logs");
+  return await response.json();
 }

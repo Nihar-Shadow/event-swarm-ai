@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+ollama
+apscheduler
+supabase
+python-dotenv
+requests
+pydantic
+pandas
+python-multipart
+openpyxl

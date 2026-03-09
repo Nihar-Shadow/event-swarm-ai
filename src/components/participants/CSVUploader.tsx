@@ -54,11 +54,27 @@ export function CSVUploader() {
     [handleFile]
   );
 
-  const confirmImport = () => {
-    if (!preview) return;
+  const confirmImport = async () => {
+    if (!preview || !inputRef.current?.files?.[0]) return;
+    const file = inputRef.current.files[0];
+
+    // 1. Upload to Supabase (Database)
     insertMutation.mutate(preview, {
       onSuccess: () => setPreview(null),
     });
+
+    // 2. Upload to Local Python Backend (for Email Agent memory)
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      await fetch("http://localhost:8000/api/upload-participants", {
+        method: "POST",
+        body: formData,
+      });
+      console.log("Uploaded to local agent memory");
+    } catch (err) {
+      console.error("Failed to upload to local agent memory", err);
+    }
   };
 
   return (
@@ -69,9 +85,8 @@ export function CSVUploader() {
         onDragLeave={() => setDragOver(false)}
         onDrop={onDrop}
         onClick={() => inputRef.current?.click()}
-        className={`glass-card rounded-xl p-8 border-2 border-dashed cursor-pointer transition-all text-center ${
-          dragOver ? "border-primary bg-primary/5" : "border-border/50 hover:border-primary/40"
-        }`}
+        className={`glass-card rounded-xl p-8 border-2 border-dashed cursor-pointer transition-all text-center ${dragOver ? "border-primary bg-primary/5" : "border-border/50 hover:border-primary/40"
+          }`}
       >
         <input
           ref={inputRef}
