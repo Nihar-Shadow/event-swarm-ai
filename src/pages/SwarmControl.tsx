@@ -2,25 +2,18 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import {
   Cpu, Bot, CheckCircle2, Loader2, AlertTriangle, Play, RotateCcw,
   Zap, Mail, Share2, CalendarClock, BarChart3, ShieldAlert, Network,
-  ArrowRight, Circle
+  ArrowRight, Circle, Database
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { toast } from "sonner";
 
 // ── Agent Definitions ──
 interface Agent {
-  id: string;
   name: string;
-  icon: any;
-  color: string;
-  dotColor: string;
-  bgColor: string;
   status: "active" | "idle" | "processing";
-  tasksCompleted: number;
-  currentTask: string;
-  x: number;
-  y: number;
+  tasks: number;
 }
 
 interface Connection {
@@ -39,99 +32,141 @@ interface FlowMessage {
 }
 
 interface ActivityLog {
-  timestamp: string;
-  from: string;
-  to: string;
+  agent: string;
   message: string;
-  type: "command" | "data" | "alert" | "notification";
+  time: string;
+  timestamp: string;
 }
 
-const AGENT_DEFS: Omit<Agent, "status" | "currentTask">[] = [
-  { id: "orchestrator", name: "Orchestrator", icon: Cpu, color: "text-primary", dotColor: "bg-primary", bgColor: "bg-primary/10", tasksCompleted: 1247, x: 50, y: 15 },
-  { id: "content", name: "Content Agent", icon: Share2, color: "text-neon-rose", dotColor: "bg-neon-rose", bgColor: "bg-neon-rose/10", tasksCompleted: 326, x: 15, y: 45 },
-  { id: "email", name: "Email Agent", icon: Mail, color: "text-neon-cyan", dotColor: "bg-neon-cyan", bgColor: "bg-neon-cyan/10", tasksCompleted: 892, x: 50, y: 45 },
-  { id: "scheduler", name: "Scheduler Agent", icon: CalendarClock, color: "text-neon-green", dotColor: "bg-neon-green", bgColor: "bg-neon-green/10", tasksCompleted: 67, x: 85, y: 45 },
-  { id: "analytics", name: "Analytics Agent", icon: BarChart3, color: "text-neon-purple", dotColor: "bg-neon-purple", bgColor: "bg-neon-purple/10", tasksCompleted: 189, x: 25, y: 80 },
-  { id: "crisis", name: "Crisis Agent", icon: ShieldAlert, color: "text-neon-amber", dotColor: "bg-neon-amber", bgColor: "bg-neon-amber/10", tasksCompleted: 12, x: 75, y: 80 },
-];
+interface SwarmMemory {
+  last_schedule_update: number;
+  generated_posts: number;
+  email_notifications: number;
+  participants: number;
+}
+
+const AGENT_MAP: Record<string, { id: string; icon: any; color: string; dotColor: string; bgColor: string; x: number; y: number }> = {
+  "Orchestrator": { id: "orchestrator", icon: Cpu, color: "text-primary", dotColor: "bg-primary", bgColor: "bg-primary/10", x: 50, y: 15 },
+  "Social Media Agent": { id: "social", icon: Share2, color: "text-neon-rose", dotColor: "bg-neon-rose", bgColor: "bg-neon-rose/10", x: 15, y: 45 },
+  "Email Agent": { id: "email", icon: Mail, color: "text-neon-cyan", dotColor: "bg-neon-cyan", bgColor: "bg-neon-cyan/10", x: 50, y: 45 },
+  "Scheduler Agent": { id: "scheduler", icon: CalendarClock, color: "text-neon-green", dotColor: "bg-neon-green", bgColor: "bg-neon-green/10", x: 85, y: 45 },
+  "Reasoning Agent": { id: "reasoning", icon: Bot, color: "text-neon-purple", dotColor: "bg-neon-purple", bgColor: "bg-neon-purple/10", x: 25, y: 80 },
+  "Analytics Agent": { id: "analytics", icon: BarChart3, color: "text-neon-purple", dotColor: "bg-neon-purple", bgColor: "bg-neon-purple/10", x: 50, y: 80 },
+  "Crisis Agent": { id: "crisis", icon: ShieldAlert, color: "text-neon-amber", dotColor: "bg-neon-amber", bgColor: "bg-neon-amber/10", x: 75, y: 80 },
+  "Swarm Memory": { id: "memory", icon: Database, color: "text-neon-cyan", dotColor: "bg-neon-cyan", bgColor: "bg-neon-cyan/10", x: 92, y: 15 },
+};
 
 const CONNECTIONS: Connection[] = [
-  { from: "orchestrator", to: "content", label: "content tasks" },
-  { from: "orchestrator", to: "email", label: "email campaigns" },
-  { from: "orchestrator", to: "scheduler", label: "schedule ops" },
-  { from: "orchestrator", to: "analytics", label: "data requests" },
-  { from: "orchestrator", to: "crisis", label: "crisis alerts" },
-  { from: "email", to: "analytics", label: "delivery stats" },
-  { from: "scheduler", to: "crisis", label: "conflict data" },
-  { from: "content", to: "email", label: "email content" },
-  { from: "crisis", to: "scheduler", label: "reschedule" },
-  { from: "crisis", to: "email", label: "notifications" },
+  { from: "Scheduler Agent", to: "Orchestrator" },
+  { from: "Orchestrator", to: "Email Agent" },
+  { from: "Orchestrator", to: "Social Media Agent" },
+  { from: "Orchestrator", to: "Reasoning Agent" },
+  { from: "Orchestrator", to: "Analytics Agent" },
+  { from: "Orchestrator", to: "Crisis Agent" },
+  { from: "Email Agent", to: "Analytics Agent" },
+  { from: "Scheduler Agent", to: "Crisis Agent" },
+  { from: "Crisis Agent", to: "Email Agent" },
+  { from: "Orchestrator", to: "Swarm Memory" },
 ];
 
-const FLOW_SCENARIOS = [
-  {
-    name: "Email Campaign",
-    steps: [
-      { from: "orchestrator", to: "content", label: "Generate email content" },
-      { from: "content", to: "email", label: "Content ready" },
-      { from: "email", to: "analytics", label: "Delivery report" },
-    ],
-  },
-  {
-    name: "Crisis Response",
-    steps: [
-      { from: "orchestrator", to: "crisis", label: "Crisis detected!" },
-      { from: "crisis", to: "scheduler", label: "Reschedule sessions" },
-      { from: "crisis", to: "email", label: "Notify participants" },
-      { from: "email", to: "analytics", label: "Notification stats" },
-    ],
-  },
-  {
-    name: "Social Campaign",
-    steps: [
-      { from: "orchestrator", to: "content", label: "Generate social posts" },
-      { from: "content", to: "analytics", label: "Engagement tracking" },
-      { from: "orchestrator", to: "email", label: "Promote via email" },
-    ],
-  },
-  {
-    name: "Schedule Optimization",
-    steps: [
-      { from: "orchestrator", to: "scheduler", label: "Optimize schedule" },
-      { from: "scheduler", to: "crisis", label: "Check conflicts" },
-      { from: "scheduler", to: "email", label: "Schedule updates" },
-      { from: "email", to: "analytics", label: "Open rates" },
-    ],
-  },
+const WORKFLOWS = [
+  { id: "email_campaign", name: "Email Campaign", icon: Mail },
+  { id: "crisis_response", name: "Crisis Response", icon: ShieldAlert },
+  { id: "social_campaign", name: "Social Campaign", icon: Share2 },
+  { id: "schedule_optimization", name: "Schedule Optimization", icon: CalendarClock },
 ];
 
 const SwarmControl = () => {
-  const [agents, setAgents] = useState<Agent[]>(
-    AGENT_DEFS.map(a => ({ ...a, status: "idle" as const, currentTask: "Standing by" }))
-  );
-  const [flowMessages, setFlowMessages] = useState<FlowMessage[]>([]);
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [status, setStatus] = useState({ agents_online: 0, active_now: 0, total_tasks: 0, connections: 10 });
   const [activityLog, setActivityLog] = useState<ActivityLog[]>([]);
+  const [memory, setMemory] = useState<SwarmMemory | null>(null);
   const [isRunning, setIsRunning] = useState(false);
-  const [activeScenario, setActiveScenario] = useState<string | null>(null);
-  const svgRef = useRef<SVGSVGElement>(null);
+  const [activeWorkflow, setActiveWorkflow] = useState<string | null>(null);
+
+  const [flowMessages, setFlowMessages] = useState<FlowMessage[]>([]);
   const animFrameRef = useRef<number | null>(null);
   const flowIdCounter = useRef(0);
 
-  // Auto-run idle animations
-  useEffect(() => {
-    const interval = setInterval(() => {
-      if (!isRunning) {
-        // Random status flickers
-        setAgents(prev => prev.map(a => ({
-          ...a,
-          tasksCompleted: a.tasksCompleted + (Math.random() > 0.7 ? 1 : 0),
-        })));
-      }
-    }, 3000);
-    return () => clearInterval(interval);
-  }, [isRunning]);
+  const fetchSwarmData = useCallback(async () => {
+    try {
+      const [statusRes, agentsRes, activityRes, memoryRes] = await Promise.all([
+        fetch("http://localhost:8000/api/swarm/status"),
+        fetch("http://localhost:8000/api/swarm/agents"),
+        fetch("http://localhost:8000/api/swarm/activity"),
+        fetch("http://localhost:8000/api/swarm/memory")
+      ]);
 
-  // Animate flow messages
+      if (statusRes.ok) setStatus(await statusRes.json());
+      if (agentsRes.ok) setAgents(await agentsRes.json());
+      if (activityRes.ok) setActivityLog(await activityRes.json());
+      if (memoryRes.ok) setMemory(await memoryRes.json());
+    } catch (error) {
+      console.error("Failed to fetch swarm data:", error);
+    }
+  }, []);
+
+  // Initial Load
+  useEffect(() => {
+    fetchSwarmData();
+  }, [fetchSwarmData]);
+
+  // WebSocket for Real-time Updates
+  useEffect(() => {
+    const socket = new WebSocket("ws://localhost:8000/ws/swarm");
+
+    socket.onopen = () => {
+      console.log("WebSocket connected to Swarm Control Center");
+      toast.success("Real-time Swarm link established");
+    };
+
+    socket.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      console.log("Received swarm event:", data);
+
+      // 1. Update Activity Feed
+      setActivityLog(prev => [{
+        agent: data.agent,
+        message: data.message,
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+        timestamp: data.timestamp
+      }, ...prev].slice(0, 50));
+
+      // 2. Update Agent Status & Highlight (Active for 3s)
+      const isProcessing = data.event === "processing";
+      setAgents(prev => prev.map(a =>
+        a.name === data.agent
+          ? { ...a, status: isProcessing ? "processing" : "active", tasks: a.tasks + 1 }
+          : a
+      ));
+
+      // 3. Reset Status to idle after 3 seconds (unless it's a permanent state update)
+      setTimeout(() => {
+        setAgents(prev => prev.map(a =>
+          a.name === data.agent && (a.status === "active" || a.status === "processing")
+            ? { ...a, status: "idle" }
+            : a
+        ));
+      }, 3000);
+
+      // 4. Update Swarm Memory if present
+      if (data.memory_update) {
+        setMemory(prev => prev ? ({
+          ...prev,
+          ...data.memory_update
+        }) : null);
+      }
+    };
+
+    socket.onclose = () => {
+      console.log("WebSocket disconnected");
+      toast.error("Swarm connection lost. Retrying...");
+    };
+
+    return () => socket.close();
+  }, []);
+
+  // Animate flow messages (visual only)
   useEffect(() => {
     const animate = () => {
       setFlowMessages(prev => {
@@ -144,59 +179,39 @@ const SwarmControl = () => {
     return () => { if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current); };
   }, []);
 
-  const addLog = useCallback((from: string, to: string, message: string, type: ActivityLog["type"] = "command") => {
-    setActivityLog(prev => [{
-      timestamp: new Date().toLocaleTimeString(),
-      from, to, message, type,
-    }, ...prev].slice(0, 50));
-  }, []);
-
-  const spawnFlow = useCallback((from: string, to: string, label: string, color: string) => {
-    const id = `flow-${flowIdCounter.current++}`;
-    setFlowMessages(prev => [...prev, { id, from, to, label, progress: 0, color }]);
-  }, []);
-
-  const runScenario = useCallback(async (scenario: typeof FLOW_SCENARIOS[0]) => {
+  const triggerWorkflow = async (workflowId: string) => {
     setIsRunning(true);
-    setActiveScenario(scenario.name);
+    setActiveWorkflow(workflowId);
 
-    for (const step of scenario.steps) {
-      const fromAgent = AGENT_DEFS.find(a => a.id === step.from);
-      const toAgent = AGENT_DEFS.find(a => a.id === step.to);
+    try {
+      const res = await fetch("http://localhost:8000/api/swarm/simulate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workflow: workflowId })
+      });
 
-      // Set agents active
-      setAgents(prev => prev.map(a =>
-        a.id === step.from ? { ...a, status: "processing" as const, currentTask: `Sending: ${step.label}` } :
-        a.id === step.to ? { ...a, status: "processing" as const, currentTask: `Receiving: ${step.label}` } :
-        a
-      ));
-
-      const color = fromAgent?.dotColor.replace("bg-", "") || "primary";
-      spawnFlow(step.from, step.to, step.label, color);
-      addLog(fromAgent?.name || step.from, toAgent?.name || step.to, step.label, "command");
-
-      await new Promise(r => setTimeout(r, 1800));
-
-      // Complete step
-      setAgents(prev => prev.map(a =>
-        a.id === step.from ? { ...a, status: "active" as const, currentTask: "Task complete", tasksCompleted: a.tasksCompleted + 1 } :
-        a.id === step.to ? { ...a, status: "active" as const, currentTask: step.label } :
-        a
-      ));
+      if (res.ok) {
+        toast.success(`Workflow ${workflowId} triggered`);
+        // Trigger immediate refresh after some delay to allow backend to process
+        setTimeout(fetchSwarmData, 1000);
+        setTimeout(fetchSwarmData, 3000);
+      } else {
+        toast.error("Failed to trigger workflow");
+      }
+    } catch (error) {
+      toast.error("Network error");
+    } finally {
+      setTimeout(() => {
+        setIsRunning(false);
+        setActiveWorkflow(null);
+      }, 5000);
     }
-
-    await new Promise(r => setTimeout(r, 1000));
-
-    // Reset all to idle
-    setAgents(prev => prev.map(a => ({ ...a, status: "idle" as const, currentTask: "Standing by" })));
-    setIsRunning(false);
-    setActiveScenario(null);
-  }, [spawnFlow, addLog]);
+  };
 
   // SVG helpers
-  const getAgentCenter = (agentId: string) => {
-    const a = AGENT_DEFS.find(d => d.id === agentId);
-    if (!a) return { x: 0, y: 0 };
+  const getAgentCenter = (agentName: string) => {
+    const a = AGENT_MAP[agentName];
+    if (!a) return { x: 50, y: 50 };
     return { x: a.x, y: a.y };
   };
 
@@ -223,10 +238,10 @@ const SwarmControl = () => {
       {/* Stats */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         {[
-          { label: "Agents Online", value: agents.length, icon: Bot, color: "text-neon-cyan" },
-          { label: "Active Now", value: agents.filter(a => a.status !== "idle").length, icon: Loader2, color: "text-neon-green" },
-          { label: "Total Tasks", value: agents.reduce((s, a) => s + a.tasksCompleted, 0).toLocaleString(), icon: CheckCircle2, color: "text-neon-purple" },
-          { label: "Connections", value: CONNECTIONS.length, icon: Network, color: "text-neon-amber" },
+          { label: "Agents Online", value: status.agents_online, icon: Bot, color: "text-neon-cyan" },
+          { label: "Active Now", value: status.active_now, icon: Loader2, color: "text-neon-green" },
+          { label: "Total Tasks", value: status.total_tasks.toLocaleString(), icon: CheckCircle2, color: "text-neon-purple" },
+          { label: "Connections", value: status.connections, icon: Network, color: "text-neon-amber" },
         ].map((s, i) => (
           <div key={s.label} className="glass-card rounded-xl p-4 animate-fade-in" style={{ animationDelay: `${i * 60}ms`, animationFillMode: "both" }}>
             <div className={`${s.color} mb-2`}><s.icon className="h-4 w-4" /></div>
@@ -243,9 +258,9 @@ const SwarmControl = () => {
             <CardTitle className="text-lg flex items-center gap-2">
               <Network className="h-4 w-4 text-primary" />
               Agent Network
-              {activeScenario && (
-                <Badge className="ml-2 animate-pulse bg-primary/20 text-primary border-primary/30">
-                  {activeScenario}
+              {activeWorkflow && (
+                <Badge className="ml-2 animate-pulse bg-primary/20 text-primary border-primary/30 uppercase">
+                  {activeWorkflow.replace("_", " ")}
                 </Badge>
               )}
             </CardTitle>
@@ -253,7 +268,7 @@ const SwarmControl = () => {
               {isRunning && (
                 <span className="text-[10px] font-mono text-neon-cyan flex items-center gap-1">
                   <span className="h-1.5 w-1.5 rounded-full bg-neon-cyan animate-pulse" />
-                  SIMULATING
+                  ORCHESTRATING
                 </span>
               )}
             </div>
@@ -262,7 +277,6 @@ const SwarmControl = () => {
         <CardContent className="p-0">
           <div className="relative w-full" style={{ paddingBottom: "55%" }}>
             <svg
-              ref={svgRef}
               viewBox="0 0 100 95"
               className="absolute inset-0 w-full h-full"
               preserveAspectRatio="xMidYMid meet"
@@ -275,20 +289,17 @@ const SwarmControl = () => {
                     <feMergeNode in="SourceGraphic" />
                   </feMerge>
                 </filter>
-                <radialGradient id="nodeGlow" cx="50%" cy="50%" r="50%">
-                  <stop offset="0%" stopColor="hsl(var(--primary))" stopOpacity="0.3" />
-                  <stop offset="100%" stopColor="hsl(var(--primary))" stopOpacity="0" />
-                </radialGradient>
               </defs>
 
               {/* Connection Lines */}
               {CONNECTIONS.map((conn, i) => {
                 const from = getAgentCenter(conn.from);
                 const to = getAgentCenter(conn.to);
-                const isActive = flowMessages.some(m =>
-                  (m.from === conn.from && m.to === conn.to) ||
-                  (m.from === conn.to && m.to === conn.from)
-                );
+
+                const fromAgent = agents.find(a => a.name === conn.from);
+                const toAgent = agents.find(a => a.name === conn.to);
+                const isActive = fromAgent?.status === "active" || toAgent?.status === "active";
+
                 return (
                   <g key={i}>
                     <line
@@ -299,49 +310,22 @@ const SwarmControl = () => {
                       opacity={isActive ? 0.8 : 0.4}
                       style={{ transition: "all 0.3s ease" }}
                     />
-                    {isActive && (
-                      <line
-                        x1={from.x} y1={from.y} x2={to.x} y2={to.y}
-                        stroke="hsl(var(--primary))"
-                        strokeWidth={0.8}
-                        opacity={0.15}
-                        filter="url(#glow)"
-                      />
-                    )}
-                  </g>
-                );
-              })}
-
-              {/* Flow Particles */}
-              {flowMessages.map(msg => {
-                const pos = getFlowPosition(msg);
-                return (
-                  <g key={msg.id}>
-                    <circle cx={pos.x} cy={pos.y} r={1.2} fill="hsl(var(--primary))" opacity={0.3} />
-                    <circle cx={pos.x} cy={pos.y} r={0.6} fill="hsl(var(--primary))" filter="url(#glow)" />
-                    <text
-                      x={pos.x} y={pos.y - 2}
-                      textAnchor="middle"
-                      fill="hsl(var(--muted-foreground))"
-                      fontSize="1.8"
-                      fontFamily="monospace"
-                    >
-                      {msg.label}
-                    </text>
                   </g>
                 );
               })}
 
               {/* Agent Nodes */}
-              {agents.map(agent => {
-                const isProcessing = agent.status === "processing";
-                const isActive = agent.status === "active";
+              {Object.entries(AGENT_MAP).map(([name, config]) => {
+                const agent = agents.find(a => a.name === name);
+                const isProcessing = agent?.status === "active";
+                const isActive = agent?.status === "active";
+
                 return (
-                  <g key={agent.id}>
-                    {/* Pulse ring for active/processing */}
-                    {(isProcessing || isActive) && (
+                  <g key={name}>
+                    {/* Pulse ring for active */}
+                    {isProcessing && (
                       <circle
-                        cx={agent.x} cy={agent.y} r={5}
+                        cx={config.x} cy={config.y} r={5}
                         fill="none"
                         stroke="hsl(var(--primary))"
                         strokeWidth={0.2}
@@ -354,39 +338,39 @@ const SwarmControl = () => {
 
                     {/* Node background */}
                     <circle
-                      cx={agent.x} cy={agent.y} r={4}
+                      cx={config.x} cy={config.y} r={4}
                       fill="hsl(var(--card))"
-                      stroke={isProcessing ? "hsl(var(--primary))" : isActive ? "hsl(var(--neon-green))" : "hsl(var(--border))"}
+                      stroke={isProcessing ? "hsl(var(--primary))" : "hsl(var(--border))"}
                       strokeWidth={isProcessing ? 0.4 : 0.2}
                       style={{ transition: "all 0.3s ease" }}
                     />
 
-                    {/* Icon placeholder (small circle) */}
+                    {/* Icon placeholder */}
                     <circle
-                      cx={agent.x} cy={agent.y}
+                      cx={config.x} cy={config.y}
                       r={1.5}
-                      fill={isProcessing ? "hsl(var(--primary))" : isActive ? "hsl(var(--neon-green))" : "hsl(var(--muted-foreground))"}
+                      fill={isProcessing ? "hsl(var(--primary))" : "hsl(var(--muted-foreground))"}
                       opacity={0.6}
                     />
 
                     {/* Label */}
                     <text
-                      x={agent.x} y={agent.y + 7}
+                      x={config.x} y={config.y + 7}
                       textAnchor="middle"
                       fill="hsl(var(--foreground))"
                       fontSize="2.2"
                       fontWeight="600"
                     >
-                      {agent.name}
+                      {name}
                     </text>
 
                     {/* Status indicator */}
                     <circle
-                      cx={agent.x + 3} cy={agent.y - 3}
+                      cx={config.x + 3} cy={config.y - 3}
                       r={0.8}
-                      fill={isProcessing ? "hsl(var(--primary))" : isActive ? "hsl(var(--neon-green))" : "hsl(var(--muted-foreground))"}
+                      fill={isProcessing ? "hsl(var(--primary))" : "hsl(var(--muted-foreground))"}
                     >
-                      {(isProcessing || isActive) && (
+                      {isProcessing && (
                         <animate attributeName="opacity" from="1" to="0.3" dur="1s" repeatCount="indefinite" />
                       )}
                     </circle>
@@ -398,8 +382,8 @@ const SwarmControl = () => {
         </CardContent>
       </Card>
 
-      {/* Scenario Triggers + Activity Log */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      {/* Workflow Controls + Shared Memory */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         {/* Scenario Buttons */}
         <Card className="glass-card">
           <CardHeader className="pb-3">
@@ -409,26 +393,59 @@ const SwarmControl = () => {
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-2">
-            {FLOW_SCENARIOS.map(scenario => (
+            {WORKFLOWS.map(workflow => (
               <Button
-                key={scenario.name}
+                key={workflow.id}
                 variant="outline"
                 className="w-full justify-between text-left h-auto py-3"
                 disabled={isRunning}
-                onClick={() => runScenario(scenario)}
+                onClick={() => triggerWorkflow(workflow.id)}
               >
-                <div>
-                  <p className="text-sm font-medium">{scenario.name}</p>
-                  <p className="text-[10px] text-muted-foreground font-mono mt-0.5">
-                    {scenario.steps.map(s => {
-                      const name = AGENT_DEFS.find(a => a.id === s.from)?.name || s.from;
-                      return name;
-                    }).filter((v, i, a) => a.indexOf(v) === i).join(" → ")}
-                  </p>
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-muted rounded-lg">
+                    <workflow.icon className="h-4 w-4" />
+                  </div>
+                  <div>
+                    <p className="text-sm font-medium">{workflow.name}</p>
+                    <p className="text-[10px] text-muted-foreground font-mono uppercase">
+                      Trigger Swarm Event
+                    </p>
+                  </div>
                 </div>
                 <ArrowRight className="h-4 w-4 text-muted-foreground shrink-0" />
               </Button>
             ))}
+          </CardContent>
+        </Card>
+
+        {/* Swarm Memory Viewer */}
+        <Card className="glass-card">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-lg flex items-center gap-2">
+              <Database className="h-4 w-4 text-neon-cyan" />
+              Shared Swarm Memory
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-2 gap-3">
+              {[
+                { label: "Schedule Updates", value: memory?.last_schedule_update || 0 },
+                { label: "Generated Posts", value: memory?.generated_posts || 0 },
+                { label: "Email Drafts", value: memory?.email_notifications || 0 },
+                { label: "Participants", value: memory?.participants || 0 },
+              ].map(item => (
+                <div key={item.label} className="p-3 bg-muted/30 rounded-lg border border-border/50">
+                  <p className="text-[10px] text-muted-foreground uppercase font-semibold">{item.label}</p>
+                  <p className="text-lg font-mono font-bold text-primary">{item.value}</p>
+                </div>
+              ))}
+            </div>
+            <div className="mt-4 p-2 bg-black/20 rounded border border-white/5">
+              <p className="text-[9px] font-mono text-neon-green/70 flex items-center gap-1">
+                <span className="h-1 w-1 bg-neon-green rounded-full" />
+                MEMORY STORE SYNCED
+              </p>
+            </div>
           </CardContent>
         </Card>
 
@@ -442,18 +459,16 @@ const SwarmControl = () => {
           </CardHeader>
           <CardContent>
             {activityLog.length === 0 ? (
-              <p className="text-sm text-muted-foreground text-center py-8">Run a simulation to see agent communication.</p>
+              <p className="text-sm text-muted-foreground text-center py-8">Waiting for swarm activity...</p>
             ) : (
-              <div className="space-y-1.5 max-h-[300px] overflow-y-auto">
+              <div className="space-y-1.5 max-h-[200px] overflow-y-auto pr-2 custom-scrollbar">
                 {activityLog.map((log, i) => (
-                  <div key={i} className="flex items-start gap-2 text-xs animate-fade-in">
-                    <span className="text-[10px] font-mono text-muted-foreground w-16 shrink-0">{log.timestamp}</span>
-                    <div className="flex items-center gap-1 min-w-0">
-                      <Badge variant="secondary" className="text-[9px] shrink-0 px-1.5">{log.from}</Badge>
-                      <ArrowRight className="h-2.5 w-2.5 text-muted-foreground shrink-0" />
-                      <Badge variant="secondary" className="text-[9px] shrink-0 px-1.5">{log.to}</Badge>
-                      <span className="text-muted-foreground truncate ml-1">{log.message}</span>
+                  <div key={i} className="flex flex-col gap-0.5 pb-2 border-b border-border/30 last:border-0 animate-fade-in">
+                    <div className="flex items-center justify-between">
+                      <Badge variant="outline" className="text-[8px] bg-primary/5 text-primary border-primary/20 px-1 py-0">{log.agent}</Badge>
+                      <span className="text-[8px] font-mono text-muted-foreground">{log.time}</span>
                     </div>
+                    <p className="text-[11px] text-foreground/90 leading-tight mt-0.5">{log.message}</p>
                   </div>
                 ))}
               </div>
@@ -463,44 +478,37 @@ const SwarmControl = () => {
       </div>
 
       {/* Agent Status Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+      <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-2">
+        <Bot className="h-4 w-4" /> Agent Health & Status
+      </h2>
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
         {agents.map((agent, i) => {
-          const Icon = agent.icon;
+          const config = AGENT_MAP[agent.name];
+          if (!config) return null;
+          const Icon = config.icon;
           return (
             <div
-              key={agent.id}
-              className={`glass-card rounded-xl p-4 animate-fade-in transition-all duration-300 ${
-                agent.status === "processing" ? "ring-1 ring-primary/50" :
-                agent.status === "active" ? "ring-1 ring-neon-green/30" : ""
-              }`}
+              key={agent.name}
+              className={`glass-card rounded-xl p-4 animate-fade-in transition-all duration-300 ${agent.status === "active" ? "ring-1 ring-primary/50 shadow-[0_0_15px_-5px_hsl(var(--primary))]" : ""
+                }`}
               style={{ animationDelay: `${i * 60}ms`, animationFillMode: "both" }}
             >
               <div className="flex items-center justify-between mb-2">
                 <div className="flex items-center gap-2">
-                  <div className={`p-1.5 rounded-lg ${agent.bgColor}`}>
-                    <Icon className={`h-3.5 w-3.5 ${agent.color}`} />
+                  <div className={`p-1.5 rounded-lg ${config.bgColor}`}>
+                    <Icon className={`h-3.5 w-3.5 ${config.color}`} />
                   </div>
                   <span className="text-sm font-semibold">{agent.name}</span>
                 </div>
                 <div className="flex items-center gap-1.5">
-                  <span className={`text-[9px] font-mono uppercase px-1.5 py-0.5 rounded-full ${
-                    agent.status === "processing" ? "bg-primary/10 text-primary" :
-                    agent.status === "active" ? "bg-neon-green/10 text-neon-green" :
-                    "bg-muted text-muted-foreground"
-                  }`}>
+                  <Badge variant={agent.status === "active" ? "default" : "secondary"} className="text-[9px] uppercase px-1.5 py-0">
                     {agent.status}
-                  </span>
-                  <div className={`h-1.5 w-1.5 rounded-full ${
-                    agent.status === "processing" ? "bg-primary animate-pulse" :
-                    agent.status === "active" ? "bg-neon-green animate-pulse" :
-                    "bg-muted-foreground"
-                  }`} />
+                  </Badge>
                 </div>
               </div>
-              <p className="text-[11px] text-muted-foreground truncate">{agent.currentTask}</p>
-              <div className="flex items-center justify-between mt-2">
-                <span className="text-[10px] text-muted-foreground font-mono">{agent.tasksCompleted} tasks</span>
-                {agent.status === "processing" && (
+              <div className="flex items-center justify-between mt-4 pt-3 border-t border-border/50">
+                <span className="text-[10px] text-muted-foreground font-mono">{agent.tasks} tasks processed</span>
+                {agent.status === "active" && (
                   <Loader2 className="h-3 w-3 text-primary animate-spin" />
                 )}
               </div>

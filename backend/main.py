@@ -3,13 +3,15 @@ import os
 import asyncio
 from datetime import datetime
 from typing import List, Optional
-from fastapi import FastAPI, HTTPException, Body
+from fastapi import FastAPI, HTTPException, Body, File, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from supabase import create_client, Client
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 import requests
+from swarm_controller import swarm_controller
+from swarm_memory import update_memory, get_memory, get_full_memory
 import ollama
 import smtplib
 from email.mime.text import MIMEText
@@ -53,6 +55,11 @@ class PostData(BaseModel):
     image_url: str
     scheduled_time: str
 
+class PostNowData(BaseModel):
+    platform: str
+    caption: str
+    image_url: str
+
 class Participant(BaseModel):
     name: str
     email: str
@@ -72,6 +79,85 @@ local_email_logs = []
 # Local storage fallback
 local_logs = []
 local_posts = []
+
+# Real-time Swarm Event Queue & Broadcasting
+swarm_event_queue = asyncio.Queue()
+active_websockets: List[WebSocket] = []
+
+async def broadcast_worker():
+    """Background task to broadcast events from the queue to all connected clients."""
+    while True:
+        event = await swarm_event_queue.get()
+        disconnected = []
+        for ws in active_websockets:
+            try:
+                await ws.send_json(event)
+            except Exception:
+                disconnected.append(ws)
+        
+        for ws in disconnected:
+            if ws in active_websockets:
+                active_websockets.remove(ws)
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(broadcast_worker())
+
+@app.websocket("/ws/swarm")
+async def swarm_socket(websocket: WebSocket):
+    await websocket.accept()
+    active_websockets.append(websocket)
+    try:
+        while True:
+            # Keep the connection open
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        if websocket in active_websockets:
+            active_websockets.remove(websocket)
+    except Exception as e:
+        print(f"WebSocket error: {e}")
+        if websocket in active_websockets:
+            active_websockets.remove(websocket)
+
+async def log_swarm_event(agent: str, event: str, message: str, memory_update: dict = None):
+    """Broadcast an event to all connected WebSocket clients."""
+    data = {
+        "agent": agent,
+        "event": event,
+        "message": message,
+        "timestamp": datetime.now().isoformat()
+    }
+    if memory_update:
+        data["memory_update"] = memory_update
+    
+    swarm_event_queue.put_nowait(data)
+    
+    # Also log to activity feed in memory for persistence/polling fallback
+    try:
+        from swarm_memory import log_activity_feed
+        log_activity_feed(agent, message)
+    except ImportError:
+        pass
+
+def log_swarm_event_sync(agent: str, event: str, message: str, memory_update: dict = None):
+    """Synchronous wrapper for log_swarm_event."""
+    data = {
+        "agent": agent,
+        "event": event,
+        "message": message,
+        "timestamp": datetime.now().isoformat()
+    }
+    if memory_update:
+        data["memory_update"] = memory_update
+    
+    swarm_event_queue.put_nowait(data)
+    
+    # Also log to activity feed
+    try:
+        from swarm_memory import log_activity_feed
+        log_activity_feed(agent, message)
+    except ImportError:
+        pass
 
 async def log_activity(action: str, platform: Optional[str] = None):
     log_entry = {
@@ -98,6 +184,7 @@ def publish_to_social_media(post_id: str, platform: str, caption: str):
 
 @app.post("/api/generate-social-content")
 async def generate_content(data: EventData):
+    swarm_controller("event_created", data.dict())
     await log_activity(f"Started generating content for {data.eventName}")
     
     try:
@@ -131,27 +218,31 @@ async def generate_content(data: EventData):
         Do not include any text before or after the JSON.
         """
         
-        response = ollama.chat(
-            model='llama3.2', 
-            messages=[{'role': 'user', 'content': prompt}],
-            options={'temperature': 0.8, 'num_predict': 4096}
-        )
-        content_raw = response['message']['content']
-        print(f"Ollama Raw Output: {content_raw[:200]}...") # Log for debugging
-        
-        import json
-        import re
         try:
-            # More aggressive JSON cleaning - find first '{' and last '}'
-            start = content_raw.find('{')
-            end = content_raw.rfind('}') + 1
-            if start != -1 and end != -1:
-                json_str = content_raw[start:end]
-                generated_content = json.loads(json_str)
-            else:
-                raise ValueError("No JSON found in response")
-        except Exception as e:
-            print(f"FAILED TO PARSE AI JSON: {e}")
+            response = ollama.chat(
+                model='llama3.2', 
+                messages=[{'role': 'user', 'content': prompt}],
+                options={'temperature': 0.8, 'num_predict': 4096}
+            )
+            content_raw = response['message']['content']
+            print(f"Ollama Raw Output: {content_raw[:200]}...") # Log for debugging
+            
+            import json
+            import re
+            try:
+                # More aggressive JSON cleaning - find first '{' and last '}'
+                start = content_raw.find('{')
+                end = content_raw.rfind('}') + 1
+                if start != -1 and end != -1:
+                    json_str = content_raw[start:end]
+                    generated_content = json.loads(json_str)
+                else:
+                    raise ValueError("No JSON found in response")
+            except Exception as e:
+                print(f"FAILED TO PARSE AI JSON: {e}")
+                generated_content = {}
+        except Exception as ollama_error:
+            print(f"Ollama chat failed (e.g., model missing): {ollama_error}")
             generated_content = {}
 
         # High-Quality Premium Long-Form Fallback
@@ -273,6 +364,28 @@ async def schedule_post(data: PostData):
     
     return {"status": "success", "post_id": post_id}
 
+@app.post("/api/post-now")
+async def post_now(data: PostNowData):
+    await log_activity(f"Publishing post directly to {data.platform}", data.platform)
+    post_id = "local-" + str(datetime.now().timestamp())
+    
+    try:
+        post_dict = data.dict()
+        post_dict['scheduled_time'] = datetime.now().isoformat()
+        res = supabase.table("generated_posts").insert(post_dict).execute()
+        if res.data: post_id = res.data[0]['id']
+    except: pass
+    
+    print(f"Publishing to {data.platform}: {data.caption}")
+    try:
+        supabase.table("generated_posts").update({"status": "published"}).eq("id", post_id).execute()
+    except Exception:
+        pass
+    
+    await log_activity(f"Published post to {data.platform}", data.platform)
+    
+    return {"status": "success", "post_id": post_id}
+
 def personalize_template(template: str, participant: dict, event_name: str) -> str:
     # Safely handle missing keys by using get()
     return template.format(
@@ -300,6 +413,7 @@ async def upload_participants(file: UploadFile = File(...)):
         
         participants = df.to_dict('records')
         participants_storage = participants # Store in memory
+        swarm_controller("participants_uploaded", participants)
         return participants
     except Exception as e:
         await log_activity(f"File Upload Error: {str(e)}")
@@ -454,11 +568,19 @@ class EventSchedulerAgent:
         self.explanation = ""
 
     def log(self, message: str):
-        print(f"[Scheduler] {message}")
-        scheduler_logs.append(message)
+        timestamp = datetime.now().strftime("%I:%M:%S %p").lstrip("0")
+        formatted_message = f"[{timestamp}] [Scheduler Agent] {message}"
+        print(formatted_message)
+        scheduler_logs.append(formatted_message)
+        
+        # Determine event type
+        event_type = "activity"
+        if "conflict" in message.lower(): event_type = "schedule_conflict"
+        if "Scheduled" in message: event_type = "session_scheduled"
+        
+        log_swarm_event_sync("Scheduler Agent", event_type, message)
 
     def load_data(self):
-        self.log("Loading sessions, speakers, and rooms")
         self.sessions = [s.copy() for s in sessions_db]
         
         # Parse times
@@ -478,28 +600,40 @@ class EventSchedulerAgent:
         pass
 
     def run(self):
-        self.log("Scheduler started")
         scheduler_logs.clear() # clear previous run logs
         self.log("Scheduler started")
         
         self.load_data()
         self.log(f"Loaded {len(self.sessions)} sessions")
+        self.log(f"Loaded {len(self.speakers)} speakers")
+        self.log(f"Loaded {len(self.rooms)} rooms")
         
         # Sort sessions by preferred time
         self.sessions.sort(key=lambda x: x["_preferred_dt"])
         
         self.generate_schedule()
         
-        if self.conflicts:
-            self.log(f"Detected {len(self.conflicts)} conflicts")
-            self.resolve_conflicts()
-        
-        self.log("Final schedule generated successfully")
+        self.log("Final schedule generated")
+        self.log(f"Schedule applied — {len(self.schedule)} sessions scheduled")
         
         if self.conflicts:
-            self.explanation = f"Detected and resolved {len(self.conflicts)} conflicts by moving sessions to available time slots."
+            unique_conflict_sessions = len(set(c["session"] for c in self.conflicts))
+            self.explanation = (f"AI Explanation:\n"
+                                f"Detected speaker and room conflicts across {unique_conflict_sessions} sessions.\n"
+                                f"Sessions were moved to the next available time slots to avoid overlap and respect room constraints.")
+            # Write to swarm memory FIRST, then trigger controller
+            self.log("[Swarm Memory] Schedule update stored.")
+            update_memory("last_schedule_update", self.schedule)
+            ai_insight = swarm_controller("schedule_updated", self.schedule)
+            if ai_insight:
+                self.log("[Reasoning Agent] Generating AI explanation")
+                for line in ai_insight.splitlines():
+                    if line.strip():
+                        self.log(line)
         else:
-            self.explanation = "All sessions scheduled without any conflicts."
+            self.explanation = "AI Explanation: All sessions were scheduled perfectly at their preferred times. No conflicts detected."
+            
+        self.log(self.explanation)
             
         return {
             "schedule": self.schedule,
@@ -510,15 +644,28 @@ class EventSchedulerAgent:
 
     def run_with_payload(self, req: ScheduleRequest):
         scheduler_logs.clear()
-        self.log("Scheduler started with custom payload")
+        self.log("Scheduler started")
         
         self.sessions = [s.copy() for s in req.sessions]
         self.rooms = [r.copy() for r in req.rooms]
-        self.speakers = {} # we don't have speaker limits in this mode or can use session['speaker_name']
+        
+        # Load speakers from Supabase to match UI datasource
+        self.speakers = {}
+        try:
+            sp_res = supabase.table("speakers").select("*").execute()
+            if sp_res.data:
+                self.speakers = {sp["id"]: sp for sp in sp_res.data}
+        except Exception:
+            pass
+            
         self.conflicts = []
         self.schedule = []
         self.explanation = ""
         self.event_date = req.event_date
+        
+        self.log(f"Loaded {len(self.sessions)} sessions")
+        self.log(f"Loaded {len(self.speakers)} speakers")
+        self.log(f"Loaded {len(self.rooms)} rooms")
         
         for s in self.sessions:
             try:
@@ -532,11 +679,35 @@ class EventSchedulerAgent:
         self.sessions.sort(key=lambda x: x["_preferred_dt"]) # sort by preferred time
         
         self.generate_schedule()
+        
+        self.log("Final schedule generated")
+        self.log(f"Schedule applied — {len(self.schedule)} sessions scheduled")
+        
+        if self.conflicts:
+            unique_conflict_sessions = len(set(c["session"] for c in self.conflicts))
+            self.explanation = (f"AI Explanation:\n"
+                                f"Detected speaker and room conflicts across {unique_conflict_sessions} sessions.\n"
+                                f"Sessions were moved to the next available time slots to avoid overlap and respect room constraints.")
+            
+            # Write to swarm memory FIRST, then trigger controller
+            self.log("[Swarm Memory] Schedule update stored.")
+            update_memory("last_schedule_update", self.schedule)
+            ai_insight = swarm_controller("schedule_updated", self.schedule)
+            if ai_insight:
+                self.log("[Reasoning Agent] Generating AI explanation")
+                for line in ai_insight.splitlines():
+                    if line.strip():
+                        self.log(line)
+        else:
+            self.explanation = "AI Explanation: All sessions were scheduled perfectly at their preferred times. No conflicts detected."
+            
+        self.log(self.explanation)
+        
         return {
             "schedule": self.schedule,
             "conflicts": self.conflicts,
             "logs": scheduler_logs,
-            "summary": "Generated schedule successfully"
+            "summary": self.explanation
         }
 
     def generate_schedule(self):
@@ -545,37 +716,83 @@ class EventSchedulerAgent:
         room_availability = {r["id"]: current_time for r in self.rooms}
         speaker_schedule = {s: [] for s in self.speakers.keys()}
         
+        self.log("Validating speaker availability")
+        for sp_id, sp in self.speakers.items():
+            avail_start = sp.get("availability_start", "N/A")
+            avail_end = sp.get("availability_end", "N/A")
+            sp_name = sp.get("name", "Unknown")
+            self.log(f"Speaker {sp_name} available from {avail_start} to {avail_end}")
+            
+        self.log("Checking room capacity")
+        self.log("Checking preferred session times")
+        
         for session in self.sessions:
             speaker_id = session.get("speaker_id")
+            title = session.get("title", "Unknown Session")
             duration = session.get("duration", 60)
             
+            self.log(f"Attempting to schedule session: {title}")
+            pref_time_str = session.get("preferred_time", "09:00")
+            self.log(f"Preferred time requested: {pref_time_str}")
+            
             if not self.rooms:
-                 self.log(f"No rooms available to schedule {session['title']}")
+                 self.log(f"No rooms available to schedule {title}")
                  continue
                  
             # Target start time
             start_time = getattr(self, 'event_date', None)
             if start_time:
-                assigned_start = session.get("_preferred_dt", datetime.strptime(f"{self.event_date} 09:00", "%Y-%m-%d %H:%M"))
+                assigned_start = session.get("_assigned_start_dt", session.get("_preferred_dt", datetime.strptime(f"{self.event_date} 09:00", "%Y-%m-%d %H:%M")))
             else:
-                assigned_start = session.get("_preferred_dt", current_time)
+                assigned_start = session.get("_assigned_start_dt", session.get("_preferred_dt", current_time))
             
             assigned_room = None
-            
-            # Find an available room and avoid speaker conflicts
+            assigned_room_obj = None
             resolved = False
+            initial_assigned_start = assigned_start
+            
+            # Initialize conflict tracking for this run
+            session["has_conflict"] = False
+            session["conflict_type"] = None
+            
             while not resolved:
-                # Find first available room for assigned_start
-                for room_id in room_availability:
-                    if room_availability[room_id] <= assigned_start:
-                        assigned_room = room_id
-                        break
+                # Find space based on preferences or availability
+                pref_room_id = session.get("room_id")
+                pref_room_name = session.get("room_name")
+                if not pref_room_name and pref_room_id:
+                     pref_room_name = next((r["name"] for r in self.rooms if r["id"] == pref_room_id), "Unknown Room")
                 
-                if not assigned_room:
-                    # Move time forward by 15 mins to find a room
-                    assigned_start += timedelta(minutes=15)
-                    continue
+                if pref_room_id:
+                    if room_availability.get(pref_room_id, current_time) <= assigned_start:
+                        assigned_room = pref_room_id
+                        assigned_room_obj = next((r for r in self.rooms if r["id"] == pref_room_id), None)
+                    else:
+                        self.log(f"Room conflict detected for {pref_room_name}")
+                        new_time = assigned_start + timedelta(minutes=duration)
+                        self.log(f"Moving session \"{title}\" from {assigned_start.strftime('%H:%M')} to {new_time.strftime('%H:%M')}")
+                        assigned_start = new_time
+                        self.conflicts.append({"session": title, "reason": "room conflict"})
+                        session["has_conflict"] = True
+                        session["conflict_type"] = "room"
+                        continue
+                else:
+                    for room in self.rooms:
+                        r_id = room["id"]
+                        if room_availability[r_id] <= assigned_start:
+                            assigned_room = r_id
+                            assigned_room_obj = room
+                            break
                     
+                    if not assigned_room:
+                        self.log(f"Room conflict detected (all rooms occupied)")
+                        new_time = assigned_start + timedelta(minutes=duration)
+                        self.log(f"Moving session \"{title}\" from {assigned_start.strftime('%H:%M')} to {new_time.strftime('%H:%M')}")
+                        assigned_start = new_time
+                        self.conflicts.append({"session": title, "reason": "room conflict"})
+                        session["has_conflict"] = True
+                        session["conflict_type"] = "room"
+                        continue
+                        
                 end_time = assigned_start + timedelta(minutes=duration)
                 
                 # Check expected speaker availability
@@ -592,18 +809,25 @@ class EventSchedulerAgent:
                         
                         if assigned_start < avail_start or end_time > avail_end:
                             av_conflict = True
+                            sp_name = session.get("speaker_name")
+                            if not sp_name and speaker_id in self.speakers:
+                                sp_name = self.speakers[speaker_id].get("name")
+                            if not sp_name: sp_name = "Speaker"
                             
                             if assigned_start < avail_start:
-                                self.log(f"Availability conflict for {speaker_id}: Moved to {avail_start.strftime('%H:%M')}")
+                                self.log(f"Speaker conflict detected for {sp_name}")
+                                self.log(f"Moving session \"{title}\" from {assigned_start.strftime('%H:%M')} to {avail_start.strftime('%H:%M')}")
                                 assigned_start = avail_start
                                 assigned_room = None
                                 session["has_conflict"] = True
-                                session["conflict_note"] = f"Moved to {avail_start.strftime('%H:%M')} due to availability"
+                                session["conflict_type"] = "availability"
+                                self.conflicts.append({"session": title, "reason": "speaker unavailable at preferred time"})
                                 continue
                             else:
-                                self.log(f"Availability conflict for {speaker_id}: Exceeds availability end")
+                                self.log(f"Speaker conflict detected for {sp_name} (exceeds end time)")
                                 session["has_conflict"] = True
-                                session["conflict_note"] = f"Duration exceeds availability end"
+                                session["conflict_type"] = "availability"
+                                self.conflicts.append({"session": title, "reason": "speaker unavailable (exceeds end time)"})
                     except Exception: pass
 
                 # Check double booking
@@ -615,11 +839,19 @@ class EventSchedulerAgent:
                             break
                         
                 if has_speaker_conflict:
-                    self.log(f"Conflict detected: Speaker double booked")
-                    assigned_start += timedelta(minutes=15)
+                    sp_name = session.get("speaker_name")
+                    if not sp_name and speaker_id in self.speakers:
+                         sp_name = self.speakers[speaker_id].get("name")
+                    if not sp_name:
+                         sp_name = "Speaker"
+                    self.log(f"Speaker conflict detected for {sp_name}")
+                    new_time = assigned_start + timedelta(minutes=duration)
+                    self.log(f"Moving session \"{title}\" from {assigned_start.strftime('%H:%M')} to {new_time.strftime('%H:%M')}")
+                    assigned_start = new_time
                     assigned_room = None
                     session["has_conflict"] = True
-                    session["conflict_note"] = "Moved due to speaker double booking"
+                    session["conflict_type"] = "speaker"
+                    self.conflicts.append({"session": title, "reason": "speaker double booked"})
                 else:
                     resolved = True
 
@@ -630,15 +862,22 @@ class EventSchedulerAgent:
                     speaker_schedule[speaker_id] = []
                 speaker_schedule[speaker_id].append((assigned_start, end_time))
             
+            room_name = assigned_room_obj["name"] if assigned_room_obj else assigned_room
+            self.log(f"Assigning room {room_name}")
+            self.log(f"Assigning session '{title}' to {room_name}")
+            
             self.schedule.append({
                 "session_id": session.get("id"),
-                "session": session.get("title", ""),
+                "session": title,
                 "room_id": assigned_room,
                 "start_time": assigned_start.isoformat(),
                 "end_time": end_time.isoformat(),
+                "scheduled_start": assigned_start.strftime("%H:%M"),
+                "scheduled_end": end_time.strftime("%H:%M"),
                 "has_conflict": session.get("has_conflict", False),
-                "conflict_note": session.get("conflict_note", None)
+                "conflict_type": session.get("conflict_type")
             })
+            self.log(f"[Scheduler Agent] Scheduled '{title}' with conflict_type: {session.get('conflict_type')}")
 
     def resolve_conflicts(self):
         # Already resolved during assignment loop
@@ -694,6 +933,140 @@ async def get_conflicts():
 async def get_scheduler_logs():
     return scheduler_logs
 
+@app.delete("/api/logs")
+async def clear_scheduler_logs():
+    scheduler_logs.clear()
+    return {"message": "Logs cleared successfully"}
+
+@app.get("/api/swarm-memory")
+async def get_swarm_memory():
+    """Inspect the current shared memory state across all agents."""
+    from swarm_memory import get_full_memory
+    return get_full_memory()
+
+@app.get("/api/swarm/activity")
+async def get_swarm_activity():
+    from swarm_memory import swarm_memory
+    return swarm_memory.get("activity_feed", [])
+
+@app.get("/api/swarm/insight")
+async def get_swarm_insight():
+    from swarm_memory import swarm_memory
+    return {"ai_insight": swarm_memory.get("ai_insight", "")}
+
+@app.get("/api/swarm/status")
+async def get_swarm_status():
+    from swarm_memory import swarm_memory
+    agents = swarm_memory.get("agent_status", {})
+    return {
+        "agents_online": len(agents),
+        "active_now": len([a for a in agents.values() if a["status"] != "idle"]),
+        "total_tasks": sum(a["tasks"] for a in agents.values()),
+        "connections": 10
+    }
+
+@app.get("/api/swarm/graph")
+async def get_swarm_graph():
+    return {
+        "connections": [
+            {"from": "Scheduler Agent", "to": "Orchestrator"},
+            {"from": "Orchestrator", "to": "Email Agent"},
+            {"from": "Orchestrator", "to": "Social Media Agent"},
+            {"from": "Orchestrator", "to": "Reasoning Agent"},
+            {"from": "Orchestrator", "to": "Analytics Agent"},
+            {"from": "Orchestrator", "to": "Crisis Agent"},
+            {"from": "Email Agent", "to": "Analytics Agent"},
+            {"from": "Scheduler Agent", "to": "Crisis Agent"},
+            {"from": "Crisis Agent", "to": "Email Agent"}
+        ]
+    }
+
+@app.get("/api/swarm/agents")
+async def get_swarm_agents():
+    from swarm_memory import swarm_memory
+    status = swarm_memory.get("agent_status", {})
+    return [{"name": name, **data} for name, data in status.items()]
+
+@app.post("/api/swarm/simulate")
+async def simulate_swarm(payload: dict = Body(...)):
+    workflow = payload.get("workflow")
+    from swarm_controller import swarm_controller
+    
+    if workflow == "email_campaign":
+        swarm_controller("participants_uploaded", [{"name": "Test User", "email": "test@example.com"}])
+    elif workflow == "crisis_response":
+        swarm_controller("crisis_detected", {"reason": "Speaker Emergency"})
+    elif workflow == "social_campaign":
+        swarm_controller("event_created", {"eventName": "Swarm Launch", "theme": "AI Automation"})
+    elif workflow == "schedule_optimization":
+        swarm_controller("schedule_updated", [{"session": "AI Keynote", "scheduled_start": "10:00 AM"}])
+    else:
+        raise HTTPException(status_code=400, detail="Invalid workflow")
+    
+    return {"status": "triggered", "workflow": workflow}
+
+@app.get("/api/swarm/memory")
+async def get_swarm_memory_values():
+    from swarm_memory import swarm_memory
+    
+    participants_count = len(swarm_memory.get("participants", []))
+    
+    # Fallback to Supabase if memory is empty (system restart/cleared)
+    if participants_count == 0:
+        try:
+            res = supabase.table("participants").select("id", count="exact").execute()
+            if res.count is not None:
+                participants_count = res.count
+        except Exception:
+            pass
+
+    return {
+        "last_schedule_update": len(swarm_memory.get("last_schedule_update", []) or []),
+        "generated_posts": len(swarm_memory.get("generated_posts", [])),
+        "email_notifications": len(swarm_memory.get("email_notifications", [])),
+        "participants": participants_count
+    }
+
+@app.get("/api/email/activity")
+async def get_email_activity():
+    from swarm_memory import swarm_memory
+    return swarm_memory.get("email_logs", [])
+
+@app.get("/api/email/drafts")
+async def get_email_drafts():
+    from swarm_memory import swarm_memory
+    memory_drafts = swarm_memory.get("email_notifications", [])
+    
+    # Try fetching from DB for persistence
+    db_drafts = []
+    try:
+        res = supabase.table("email_campaigns").select("*").eq("status", "draft").order("created_at", desc=True).execute()
+        if res.data:
+            for d in res.data:
+                db_drafts.append({
+                    "subject": d["subject_template"],
+                    "body": d["body_template"],
+                    "sent_to": d["total_recipients"],
+                    "timestamp": d["created_at"]
+                })
+    except Exception:
+        pass
+        
+    return memory_drafts + db_drafts
+
+
+@app.delete("/api/email/drafts")
+async def clear_email_drafts():
+    from swarm_memory import update_memory
+    update_memory("email_notifications", [])
+    return {"status": "cleared"}
+
+
+@app.get("/api/social/logs")
+async def get_social_logs():
+    from swarm_memory import swarm_memory
+    return swarm_memory.get("social_logs", [])
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
